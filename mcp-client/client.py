@@ -8,6 +8,8 @@ from mcp.client.stdio import stdio_client
 from anthropic import Anthropic
 from dotenv import load_dotenv
 
+import os
+
 load_dotenv()  # load environment variables from .env
 
 class MCPClient:
@@ -16,6 +18,7 @@ class MCPClient:
         self.session: Optional[ClientSession] = None
         self.exit_stack = AsyncExitStack()
         self.anthropic = Anthropic()
+        print("API KEY LOADED:", self.anthropic.api_key[:6], "..." if self.anthropic.api_key else "None")
     # methods will go here
 
 
@@ -50,24 +53,73 @@ class MCPClient:
 
 
     async def process_query(self, query: str) -> str:
-        """Process a query using the available tools (Claude 없이 테스트용)"""
+        print('execute')
+        print("""Process a query using Claude and available tools""")
+        messages = [
+            {
+                "role": "user",
+                "content": query
+            }
+        ]
 
-        # MCP 서버에서 사용 가능한 툴 가져오기
         response = await self.session.list_tools()
-        tools = response.tools
-        print("\nAvailable tools:", [tool.name for tool in tools])
+        available_tools = [{
+            "name": tool.name,
+            "description": tool.description,
+            "input_schema": tool.inputSchema
+        } for tool in response.tools]
 
-        # 테스트용 툴 선택 (예: 첫 번째 툴)
-        if not tools:
-            return "No tools available from the server."
+        # Initial Claude API call
+        response = self.anthropic.messages.create(
+            model="claude-3-5-sonnet-20241022",
+            max_tokens=1000,
+            messages=messages,
+            tools=available_tools
+        )
 
-        tool_name = tools[0].name
-        tool_args = {"location": query}  # 입력 쿼리를 툴의 location 인자로 넣음
+        # Process response and handle tool calls
+        final_text = []
 
-        result = await self.session.call_tool(tool_name, tool_args)
+        assistant_message_content = []
+        for content in response.content:
+            if content.type == 'text':
+                final_text.append(content.text)
+                assistant_message_content.append(content)
+            elif content.type == 'tool_use':
+                tool_name = content.name
+                tool_args = content.input
 
-        return f"[Tool response from {tool_name}]:\n{result.content}"
+                # Execute tool call
+                result = await self.session.call_tool(tool_name, tool_args)
+                final_text.append(f"[Calling tool {tool_name} with args {tool_args}]")
 
+                assistant_message_content.append(content)
+                messages.append({
+                    "role": "assistant",
+                    "content": assistant_message_content
+                })
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": content.id,
+                            "content": result.content
+                        }
+                    ]
+                })
+
+                # Get next response from Claude
+                response = self.anthropic.messages.create(
+                    model="claude-3-5-sonnet-20241022",
+                    max_tokens=1000,
+                    messages=messages,
+                    tools=available_tools
+                )
+
+                final_text.append(response.content[0].text)
+
+        return "\n".join(final_text)
 
     async def chat_loop(self):
         """Run an interactive chat loop"""
